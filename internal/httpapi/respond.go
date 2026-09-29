@@ -26,19 +26,6 @@ type failureBody struct {
 }
 
 func decode(w http.ResponseWriter, r *http.Request, target any) error {
-	return decodeRequest(w, r, target, false)
-}
-
-func decodeCompatible(w http.ResponseWriter, r *http.Request, target any) error {
-	return decodeRequest(w, r, target, true)
-}
-
-func decodeRequest(
-	w http.ResponseWriter,
-	r *http.Request,
-	target any,
-	compatibleFields bool,
-) error {
 	r.Body = http.MaxBytesReader(w, r.Body, requestLimit)
 	payload, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -46,21 +33,16 @@ func decodeRequest(
 			"reason": err.Error(),
 		})
 	}
-	if compatibleFields {
-		contract, ok := target.(domain.RequestFieldContract)
-		if ok {
-			if err := domain.ValidateRequestFields(payload, contract.RequestFields()); err != nil {
-				return err
-			}
-			if err := decodePayload(payload, target, false); err != nil {
-				return domain.Validation("request body must contain valid JSON", map[string]any{
-					"reason": err.Error(),
-				})
-			}
-			return nil
+	if contract, ok := target.(domain.RequestFieldContract); ok {
+		if err := domain.ValidateRequestFields(
+			payload,
+			contract.AllowedRequestFields(),
+			contract.RequiredRequestFields(),
+		); err != nil {
+			return err
 		}
 	}
-	if err := decodePayload(payload, target, true); err != nil {
+	if err := decodePayload(payload, target); err != nil {
 		return domain.Validation("request body must contain valid JSON", map[string]any{
 			"reason": err.Error(),
 		})
@@ -68,11 +50,9 @@ func decodeRequest(
 	return nil
 }
 
-func decodePayload(payload []byte, target any, strictFields bool) error {
+func decodePayload(payload []byte, target any) error {
 	decoder := json.NewDecoder(bytes.NewReader(payload))
-	if strictFields {
-		decoder.DisallowUnknownFields()
-	}
+	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
 		return err
 	}

@@ -8,7 +8,7 @@ import (
 
 func (s *Server) submitProbe(w http.ResponseWriter, r *http.Request) {
 	var input domain.ProbeInput
-	if err := decodeCompatible(w, r, &input); err != nil {
+	if err := decode(w, r, &input); err != nil {
 		sendError(w, r, err)
 		return
 	}

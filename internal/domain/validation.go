@@ -1,7 +1,10 @@
 package domain
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
+	"io"
 	"net"
 	"sort"
 	"strings"
@@ -20,7 +23,8 @@ const (
 )
 
 type RequestFieldContract interface {
-	RequestFields() []string
+	AllowedRequestFields() []string
+	RequiredRequestFields() []string
 }
 
 type PlanCreateInput struct {
@@ -61,7 +65,7 @@ type AssessmentInput struct {
 	RequestKey string `json:"request_key"`
 }
 
-func (PlanCreateInput) RequestFields() []string {
+func (PlanCreateInput) AllowedRequestFields() []string {
 	return []string{
 		"zone",
 		"minimum_success_ratio",
@@ -70,7 +74,32 @@ func (PlanCreateInput) RequestFields() []string {
 	}
 }
 
-func (NodeCreateInput) RequestFields() []string {
+func (PlanCreateInput) RequiredRequestFields() []string {
+	return []string{
+		"zone",
+		"minimum_success_ratio",
+		"maximum_latency_ms",
+		"expected_nodes",
+	}
+}
+
+func (RevisionCreateInput) AllowedRequestFields() []string {
+	return []string{
+		"serial",
+		"authority",
+		"entries",
+	}
+}
+
+func (RevisionCreateInput) RequiredRequestFields() []string {
+	return []string{
+		"serial",
+		"authority",
+		"entries",
+	}
+}
+
+func (NodeCreateInput) AllowedRequestFields() []string {
 	return []string{
 		"node_name",
 		"region",
@@ -78,7 +107,31 @@ func (NodeCreateInput) RequestFields() []string {
 	}
 }
 
-func (ProbeInput) RequestFields() []string {
+func (NodeCreateInput) RequiredRequestFields() []string {
+	return []string{
+		"node_name",
+		"region",
+	}
+}
+
+func (LeaseInput) AllowedRequestFields() []string {
+	return []string{
+		"request_key",
+		"region",
+		"lease_seconds",
+		"max_nodes",
+	}
+}
+
+func (LeaseInput) RequiredRequestFields() []string {
+	return []string{
+		"request_key",
+		"lease_seconds",
+		"max_nodes",
+	}
+}
+
+func (ProbeInput) AllowedRequestFields() []string {
 	return []string{
 		"request_key",
 		"success",
@@ -88,70 +141,134 @@ func (ProbeInput) RequestFields() []string {
 	}
 }
 
-func ValidateRequestFields(payload []byte, fields []string) error {
-	object := make(map[string]json.RawMessage)
-	if err := json.Unmarshal(payload, &object); err != nil || object == nil {
-		return Validation("request body must contain a JSON object", nil)
+func (ProbeInput) RequiredRequestFields() []string {
+	return []string{
+		"request_key",
+		"success",
+		"observed_serial",
+		"latency_ms",
+		"observed_at",
 	}
-	for field := range object {
-		if _, ok := resolveRequestField(field, fields); !ok {
-			return Validation("request body contains an unknown field", map[string]any{
-				"field": field,
+}
+
+func (AssessmentInput) AllowedRequestFields() []string {
+	return []string{"request_key"}
+}
+
+func (AssessmentInput) RequiredRequestFields() []string {
+	return []string{"request_key"}
+}
+
+func (input *RevisionCreateInput) UnmarshalJSON(payload []byte) error {
+	type rawRevision struct {
+		Serial    uint32            `json:"serial"`
+		Authority string            `json:"authority"`
+		Entries   []json.RawMessage `json:"entries"`
+	}
+	var raw rawRevision
+	if err := unmarshalStrict(payload, &raw); err != nil {
+		return err
+	}
+	entries := make([]ZoneEntry, 0, len(raw.Entries))
+	for _, rawEntry := range raw.Entries {
+		if string(rawEntry) == "null" {
+			return Validation("request body is invalid", map[string]any{
+				"entries": "must not contain null items",
 			})
 		}
+		var entry ZoneEntry
+		if err := unmarshalStrict(rawEntry, &entry); err != nil {
+			return err
+		}
+		entries = append(entries, entry)
+	}
+	input.Serial = raw.Serial
+	input.Authority = raw.Authority
+	input.Entries = entries
+	return nil
+}
+
+func (entry *ZoneEntry) UnmarshalJSON(payload []byte) error {
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &object); err != nil || object == nil {
+		return Validation("zone entry must contain a JSON object", nil)
+	}
+	allowed := map[string]struct{}{
+		"owner": {},
+		"type":  {},
+		"value": {},
+	}
+	required := []string{"owner", "type", "value"}
+	details := make(map[string]any)
+	for field := range object {
+		if _, ok := allowed[field]; !ok {
+			details[field] = "unknown field"
+		}
+	}
+	for _, field := range required {
+		value, present := object[field]
+		if !present {
+			details[field] = "is required"
+		} else if string(value) == "null" {
+			details[field] = "must not be null"
+		}
+	}
+	if len(details) > 0 {
+		return Validation("zone entry is invalid", details)
+	}
+
+	type zoneEntry ZoneEntry
+	var decoded zoneEntry
+	if err := unmarshalStrict(payload, &decoded); err != nil {
+		return err
+	}
+	*entry = ZoneEntry(decoded)
+	return nil
+}
+
+func unmarshalStrict(payload []byte, target any) error {
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return errors.New("request body must contain one JSON value")
 	}
 	return nil
 }
 
-func resolveRequestField(field string, fields []string) (string, bool) {
-	field = strings.TrimSpace(field)
-	for _, candidate := range fields {
-		if field == candidate {
-			return candidate, true
-		}
+func ValidateRequestFields(payload []byte, allowed []string, required []string) error {
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &object); err != nil || object == nil {
+		return Validation("request body must contain a JSON object", nil)
 	}
-	for _, candidate := range fields {
-		if requestFieldDistance(field, candidate) <= 1 {
-			return candidate, true
-		}
-	}
-	return "", false
-}
 
-func requestFieldDistance(left string, right string) int {
-	left = strings.ToLower(strings.TrimSpace(left))
-	right = strings.ToLower(strings.TrimSpace(right))
-	leftRunes := []rune(left)
-	rightRunes := []rune(right)
-	previous := make([]int, len(rightRunes)+1)
-	current := make([]int, len(rightRunes)+1)
-	for index := range previous {
-		previous[index] = index
+	allowedSet := make(map[string]struct{}, len(allowed))
+	for _, field := range allowed {
+		allowedSet[field] = struct{}{}
 	}
-	for leftIndex, leftRune := range leftRunes {
-		current[0] = leftIndex + 1
-		for rightIndex, rightRune := range rightRunes {
-			substitution := previous[rightIndex]
-			if leftRune != rightRune {
-				substitution++
-			}
-			insertion := current[rightIndex] + 1
-			deletion := previous[rightIndex+1] + 1
-			current[rightIndex+1] = minInt(substitution, insertion, deletion)
-		}
-		previous, current = current, previous
-	}
-	return previous[len(rightRunes)]
-}
-
-func minInt(values ...int) int {
-	result := values[0]
-	for _, value := range values[1:] {
-		if value < result {
-			result = value
+	details := make(map[string]any)
+	for field := range object {
+		if _, ok := allowedSet[field]; !ok {
+			details[field] = "unknown field"
 		}
 	}
-	return result
+	for _, field := range required {
+		value, present := object[field]
+		if !present {
+			details[field] = "is required"
+			continue
+		}
+		if string(value) == "null" {
+			details[field] = "must not be null"
+		}
+	}
+	if len(details) > 0 {
+		return Validation("request body is invalid", details)
+	}
+	return nil
 }
 
 func NormalizePlanInput(input PlanCreateInput) PlanCreateInput {
@@ -185,7 +302,7 @@ func NormalizeRevisionInput(input RevisionCreateInput) (RevisionCreateInput, err
 	entries := make([]ZoneEntry, 0, len(input.Entries))
 	for _, entry := range input.Entries {
 		owner := canonicalName(entry.Owner)
-		entryType := EntryType(strings.ToUpper(strings.TrimSpace(string(entry.Type))))
+		entryType := entry.Type
 		value := strings.TrimSpace(entry.Value)
 		switch entryType {
 		case EntryA:
