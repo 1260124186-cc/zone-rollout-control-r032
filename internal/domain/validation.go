@@ -1,7 +1,6 @@
 package domain
 
 import (
-	"encoding/json"
 	"net"
 	"sort"
 	"strings"
@@ -19,10 +18,9 @@ const (
 	MaxEntries         = 500
 )
 
-type RequestFieldContract interface {
-	RequestFields() []string
-}
-
+// PlanCreateInput, NodeCreateInput, and ProbeInput expose
+// RequiredRequestFields so the HTTP layer can reject incomplete payloads before
+// a missing field is mistaken for its zero value.
 type PlanCreateInput struct {
 	Zone                string  `json:"zone"`
 	MinimumSuccessRatio float64 `json:"minimum_success_ratio"`
@@ -61,7 +59,7 @@ type AssessmentInput struct {
 	RequestKey string `json:"request_key"`
 }
 
-func (PlanCreateInput) RequestFields() []string {
+func (PlanCreateInput) RequiredRequestFields() []string {
 	return []string{
 		"zone",
 		"minimum_success_ratio",
@@ -70,15 +68,14 @@ func (PlanCreateInput) RequestFields() []string {
 	}
 }
 
-func (NodeCreateInput) RequestFields() []string {
+func (NodeCreateInput) RequiredRequestFields() []string {
 	return []string{
 		"node_name",
 		"region",
-		"quarantine",
 	}
 }
 
-func (ProbeInput) RequestFields() []string {
+func (ProbeInput) RequiredRequestFields() []string {
 	return []string{
 		"request_key",
 		"success",
@@ -88,70 +85,27 @@ func (ProbeInput) RequestFields() []string {
 	}
 }
 
-func ValidateRequestFields(payload []byte, fields []string) error {
-	object := make(map[string]json.RawMessage)
-	if err := json.Unmarshal(payload, &object); err != nil || object == nil {
-		return Validation("request body must contain a JSON object", nil)
+func (RevisionCreateInput) RequiredRequestFields() []string {
+	return []string{
+		"serial",
+		"authority",
+		"entries",
 	}
-	for field := range object {
-		if _, ok := resolveRequestField(field, fields); !ok {
-			return Validation("request body contains an unknown field", map[string]any{
-				"field": field,
-			})
-		}
-	}
-	return nil
 }
 
-func resolveRequestField(field string, fields []string) (string, bool) {
-	field = strings.TrimSpace(field)
-	for _, candidate := range fields {
-		if field == candidate {
-			return candidate, true
-		}
+func (LeaseInput) RequiredRequestFields() []string {
+	// region is optional: an empty region selects ready nodes across regions.
+	return []string{
+		"request_key",
+		"lease_seconds",
+		"max_nodes",
 	}
-	for _, candidate := range fields {
-		if requestFieldDistance(field, candidate) <= 1 {
-			return candidate, true
-		}
-	}
-	return "", false
 }
 
-func requestFieldDistance(left string, right string) int {
-	left = strings.ToLower(strings.TrimSpace(left))
-	right = strings.ToLower(strings.TrimSpace(right))
-	leftRunes := []rune(left)
-	rightRunes := []rune(right)
-	previous := make([]int, len(rightRunes)+1)
-	current := make([]int, len(rightRunes)+1)
-	for index := range previous {
-		previous[index] = index
+func (AssessmentInput) RequiredRequestFields() []string {
+	return []string{
+		"request_key",
 	}
-	for leftIndex, leftRune := range leftRunes {
-		current[0] = leftIndex + 1
-		for rightIndex, rightRune := range rightRunes {
-			substitution := previous[rightIndex]
-			if leftRune != rightRune {
-				substitution++
-			}
-			insertion := current[rightIndex] + 1
-			deletion := previous[rightIndex+1] + 1
-			current[rightIndex+1] = minInt(substitution, insertion, deletion)
-		}
-		previous, current = current, previous
-	}
-	return previous[len(rightRunes)]
-}
-
-func minInt(values ...int) int {
-	result := values[0]
-	for _, value := range values[1:] {
-		if value < result {
-			result = value
-		}
-	}
-	return result
 }
 
 func NormalizePlanInput(input PlanCreateInput) PlanCreateInput {

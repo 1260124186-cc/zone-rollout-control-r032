@@ -21,6 +21,10 @@ func (s *Server) allocateLeases(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) releaseLease(w http.ResponseWriter, r *http.Request) {
+	if err := decodeEmpty(w, r); err != nil {
+		sendError(w, r, err)
+		return
+	}
 	lease, err := s.allocations.Release(r.Context(), r.PathValue("id"))
 	if err != nil {
 		sendError(w, r, err)

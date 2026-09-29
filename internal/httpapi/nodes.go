@@ -10,7 +10,7 @@ import (
 
 func (s *Server) enrollNode(w http.ResponseWriter, r *http.Request) {
 	var input domain.NodeCreateInput
-	if err := decodeCompatible(w, r, &input); err != nil {
+	if err := decode(w, r, &input); err != nil {
 		sendError(w, r, err)
 		return
 	}

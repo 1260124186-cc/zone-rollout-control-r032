@@ -25,20 +25,16 @@ type failureBody struct {
 	Error domain.DomainError `json:"error"`
 }
 
+// strictContract marks a decoded request payload: fields returned by
+// RequiredRequestFields must appear in the JSON object. Unknown fields are
+// always rejected by the decoder itself.
+type strictContract interface {
+	RequiredRequestFields() []string
+}
+
+// decode reads a required JSON object body, rejects unknown or missing fields,
+// and never lets an unrecognized or incomplete payload reach a service.
 func decode(w http.ResponseWriter, r *http.Request, target any) error {
-	return decodeRequest(w, r, target, false)
-}
-
-func decodeCompatible(w http.ResponseWriter, r *http.Request, target any) error {
-	return decodeRequest(w, r, target, true)
-}
-
-func decodeRequest(
-	w http.ResponseWriter,
-	r *http.Request,
-	target any,
-	compatibleFields bool,
-) error {
 	r.Body = http.MaxBytesReader(w, r.Body, requestLimit)
 	payload, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -46,39 +42,67 @@ func decodeRequest(
 			"reason": err.Error(),
 		})
 	}
-	if compatibleFields {
-		contract, ok := target.(domain.RequestFieldContract)
-		if ok {
-			if err := domain.ValidateRequestFields(payload, contract.RequestFields()); err != nil {
-				return err
-			}
-			if err := decodePayload(payload, target, false); err != nil {
-				return domain.Validation("request body must contain valid JSON", map[string]any{
-					"reason": err.Error(),
-				})
-			}
-			return nil
-		}
+	if len(bytes.TrimSpace(payload)) == 0 {
+		return domain.Validation("request body must contain a JSON object", nil)
 	}
-	if err := decodePayload(payload, target, true); err != nil {
+	if err := decodePayload(payload, target); err != nil {
 		return domain.Validation("request body must contain valid JSON", map[string]any{
 			"reason": err.Error(),
 		})
 	}
+	if contract, ok := target.(strictContract); ok {
+		if err := validateRequiredFields(payload, contract.RequiredRequestFields()); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
-func decodePayload(payload []byte, target any, strictFields bool) error {
-	decoder := json.NewDecoder(bytes.NewReader(payload))
-	if strictFields {
-		decoder.DisallowUnknownFields()
+// decodeEmpty is used by endpoints that carry no request body. It accepts an
+// empty body and rejects any payload that was sent.
+func decodeEmpty(w http.ResponseWriter, r *http.Request) error {
+	r.Body = http.MaxBytesReader(w, r.Body, requestLimit)
+	payload, err := io.ReadAll(r.Body)
+	if err != nil {
+		return domain.Validation("request body must be empty", map[string]any{
+			"reason": err.Error(),
+		})
 	}
+	if len(bytes.TrimSpace(payload)) != 0 {
+		return domain.Validation("request body must be empty", nil)
+	}
+	return nil
+}
+
+func decodePayload(payload []byte, target any) error {
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
 		return err
 	}
 	var extra any
 	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
 		return errors.New("request body must contain one JSON value")
+	}
+	return nil
+}
+
+func validateRequiredFields(payload []byte, required []string) error {
+	object := make(map[string]json.RawMessage)
+	if err := json.Unmarshal(payload, &object); err != nil || object == nil {
+		return domain.Validation("request body must contain a JSON object", nil)
+	}
+	missing := make([]any, 0)
+	for _, field := range required {
+		raw, ok := object[field]
+		if !ok || string(bytes.TrimSpace(raw)) == "null" {
+			missing = append(missing, field)
+		}
+	}
+	if len(missing) > 0 {
+		return domain.Validation("request body is incomplete", map[string]any{
+			"missing_fields": missing,
+		})
 	}
 	return nil
 }

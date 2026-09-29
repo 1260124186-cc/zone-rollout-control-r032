@@ -12,9 +12,13 @@ type versionInput struct {
 	ExpectedVersion uint64 `json:"expected_version"`
 }
 
+func (versionInput) RequiredRequestFields() []string {
+	return []string{"expected_version"}
+}
+
 func (s *Server) createPlan(w http.ResponseWriter, r *http.Request) {
 	var input domain.PlanCreateInput
-	if err := decodeCompatible(w, r, &input); err != nil {
+	if err := decode(w, r, &input); err != nil {
 		sendError(w, r, err)
 		return
 	}
